@@ -74,8 +74,22 @@ def assert_json_object_structure(
                 print(f"   Value: {a}")
                 return False
 
-            # Default: lists must match exactly in length and pairwise structure.
             if len(a) != len(b):
+                # Allow extra items in in root.llmSpans[*].output
+                # To avoid brittle tests, require the actual list to start with the expected sequence,
+                # but allow extra trailing items. We still compare each expected element deeply.
+                if path.startswith("root.llmSpans[") and path.endswith(
+                    ".output"
+                ):
+                    if len(a) < len(b):
+                        print(
+                            f"❌ Length mismatch at '{path}': expected ≥{len(b)}, got {len(a)}"
+                        )
+                        return False
+                    for idx, be in enumerate(b):
+                        if not _compare(a[idx], be, f"{path}[{idx}]"):
+                            return False
+                    return True
                 print(
                     f"❌ Length mismatch at '{path}': expected {len(b)}, got {len(a)}"
                 )

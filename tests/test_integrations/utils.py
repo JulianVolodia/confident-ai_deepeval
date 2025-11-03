@@ -29,6 +29,15 @@ def assert_json_object_structure(
 
             # Filter out keys to ignore
             keys_to_ignore = {"tokenIntervals"}
+
+            # NOTE: Ignore additive trace field from agent tool events.
+            # Source: deepeval.test_run.api.LLMApiTestCase.tools_called (alias "toolsCalled").
+            # Why: This field is observational, doesn’t affect metrics, and not part of
+            # the contract these tests assert. If we later want to assert tool usage, update
+            # fixtures to include "toolsCalled" and remove this ignore.
+            if path.startswith(("root.testCases[", "root.conversationalTestCases[")):
+                keys_to_ignore |= {"toolsCalled"}
+
             b_keys = set(b.keys()) - keys_to_ignore
             a_keys = set(a.keys()) - keys_to_ignore
 

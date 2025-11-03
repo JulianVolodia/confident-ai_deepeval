@@ -37,7 +37,11 @@ _current_dir = os.path.dirname(os.path.abspath(__file__))
 
 
 @assert_trace_json(
-    json_path=os.path.join(_current_dir, "test_sync_eval.json"), is_run=True
+    json_path=os.path.join(_current_dir, "test_sync_eval.json"),
+    is_run=True,
+    ignore_keypaths={
+        "root.testCases[": ("toolsCalled",),
+    },
 )
 def test_run_sync_eval():
     from deepeval.dataset import EvaluationDataset, Golden

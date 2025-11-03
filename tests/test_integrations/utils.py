@@ -1,11 +1,15 @@
 import json
-from typing import Dict, Any
+from typing import Dict, Any, Tuple, Mapping, Iterable
 from functools import wraps
 import inspect
 
 
 def assert_json_object_structure(
-    expected_json_obj: Dict[str, Any], actual_json_obj: Dict[str, Any]
+    expected_json_obj: Dict[str, Any],
+    actual_json_obj: Dict[str, Any],
+    ignore_paths: Tuple[str, ...] = (),
+    ignore_keys: Iterable[str] = ("tokenIntervals",),
+    ignore_keypaths: Mapping[str, Iterable[str]] = (),
 ) -> bool:
     """
     Validate that `actual_json_obj` matches the structure and data types of the JSON at `expected_file_path`.
@@ -18,6 +22,12 @@ def assert_json_object_structure(
     """
 
     def _compare(a: Any, b: Any, path: str = "root") -> bool:
+
+        # Ignore whole subtrees if path matches any prefix
+        for prefix in ignore_paths:
+            if path.startswith(prefix):
+                return True
+
         # Dict vs Dict
         if isinstance(b, dict):
             if not isinstance(a, dict):
@@ -28,15 +38,12 @@ def assert_json_object_structure(
                 return False
 
             # Filter out keys to ignore
-            keys_to_ignore = {"tokenIntervals"}
+            keys_to_ignore = set(ignore_keys) | {"tokenIntervals"}
 
-            # NOTE: Ignore additive trace field from agent tool events.
-            # Source: deepeval.test_run.api.LLMApiTestCase.tools_called (alias "toolsCalled").
-            # Why: This field is observational, doesn’t affect metrics, and not part of
-            # the contract these tests assert. If we later want to assert tool usage, update
-            # fixtures to include "toolsCalled" and remove this ignore.
-            if path.startswith(("root.testCases[", "root.conversationalTestCases[")):
-                keys_to_ignore |= {"toolsCalled"}
+            if ignore_keypaths:
+                for pfx, keys in ignore_keypaths.items():
+                    if path.startswith(pfx):
+                        keys_to_ignore |= set(keys)
 
             b_keys = set(b.keys()) - keys_to_ignore
             a_keys = set(a.keys()) - keys_to_ignore
@@ -66,6 +73,8 @@ def assert_json_object_structure(
                 print(f"   Got: {type(a).__name__}")
                 print(f"   Value: {a}")
                 return False
+
+            # Default: lists must match exactly in length and pairwise structure.
             if len(a) != len(b):
                 print(
                     f"❌ Length mismatch at '{path}': expected {len(b)}, got {len(a)}"
@@ -178,7 +187,14 @@ def generate_trace_json(json_path: str, is_run: bool = False):
     return decorator
 
 
-def assert_trace_json(json_path: str, is_run: bool = False):
+def assert_trace_json(
+    json_path: str,
+    is_run: bool = False,
+    *,
+    ignore_paths: Tuple[str, ...] = (),
+    ignore_keys: Iterable[str] = ("tokenIntervals",),
+    ignore_keypaths: Mapping[str, Iterable[str]] = (),
+):
     """
     Decorator that tests trace data against an expected JSON file.
 
@@ -211,8 +227,13 @@ def assert_trace_json(json_path: str, is_run: bool = False):
                 result = await func(*args, **kwargs)
                 actual_dict = await trace_testing_manager.wait_for_test_dict()
                 expected_dict = load_trace_data(json_path)
-
-                assert assert_json_object_structure(expected_dict, actual_dict)
+                assert assert_json_object_structure(
+                    expected_dict,
+                    actual_dict,
+                    ignore_paths=ignore_paths,
+                    ignore_keys=ignore_keys,
+                    ignore_keypaths=ignore_keypaths,
+                )
 
                 return result
             finally:
@@ -241,8 +262,13 @@ def assert_trace_json(json_path: str, is_run: bool = False):
                     trace_testing_manager.wait_for_test_dict()
                 )
                 expected_dict = load_trace_data(json_path)
-
-                assert assert_json_object_structure(expected_dict, actual_dict)
+                assert assert_json_object_structure(
+                    expected_dict,
+                    actual_dict,
+                    ignore_paths=ignore_paths,
+                    ignore_keys=ignore_keys,
+                    ignore_keypaths=ignore_keypaths,
+                )
 
                 return result
             finally:

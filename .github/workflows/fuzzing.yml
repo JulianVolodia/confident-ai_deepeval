@@ -1,0 +1,184 @@
+name: Fuzzing Campaign
+
+on:
+  # Run on pushes to main and PRs
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+  # Run weekly on Monday at 2 AM UTC
+  schedule:
+    - cron: '0 2 * * 1'
+
+  # Allow manual triggering
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Fuzzing duration in seconds'
+        required: false
+        default: '300'
+      target:
+        description: 'Fuzzing target (all, dataset, testcase, property)'
+        required: false
+        default: 'all'
+
+jobs:
+  fuzzing:
+    name: Fuzzing Tests
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: Install system dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm
+          echo "LDFLAGS=-L$(brew --prefix llvm)/lib" >> $GITHUB_ENV
+          echo "CPPFLAGS=-I$(brew --prefix llvm)/include" >> $GITHUB_ENV
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install -e .
+          pip install pytest hypothesis pandas
+
+      - name: Install Atheris (fuzzing engine)
+        # Atheris might fail on Windows, so we continue on error
+        continue-on-error: true
+        run: |
+          pip install atheris
+
+      - name: Run property-based tests (Hypothesis)
+        run: |
+          cd fuzzing
+          python run_fuzzing.py --target property --no-check
+        timeout-minutes: 10
+
+      - name: Run fuzzing campaign (short)
+        if: github.event_name == 'pull_request'
+        run: |
+          cd fuzzing
+          python run_fuzzing.py --target all --duration 180 --no-check
+        timeout-minutes: 5
+
+      - name: Run fuzzing campaign (medium)
+        if: github.event_name == 'push'
+        run: |
+          cd fuzzing
+          python run_fuzzing.py --target all --duration 600 --no-check
+        timeout-minutes: 15
+
+      - name: Run fuzzing campaign (custom)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          cd fuzzing
+          python run_fuzzing.py --target ${{ github.event.inputs.target }} --duration ${{ github.event.inputs.duration }} --no-check
+        timeout-minutes: 30
+
+      - name: Run fuzzing campaign (weekly long)
+        if: github.event_name == 'schedule'
+        run: |
+          cd fuzzing
+          python run_fuzzing.py --target all --duration 3600 --no-check
+        timeout-minutes: 90
+
+      - name: Upload crash artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzzing-crashes-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: fuzzing/crashes/
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Check for crashes
+        if: always()
+        run: |
+          if [ -d "fuzzing/crashes" ] && [ "$(ls -A fuzzing/crashes)" ]; then
+            echo "::warning::Fuzzing discovered potential crashes! Check artifacts."
+            exit 1
+          else
+            echo "No crashes found during fuzzing"
+          fi
+        shell: bash
+
+  security-report:
+    name: Generate Security Report
+    runs-on: ubuntu-latest
+    needs: fuzzing
+    if: always()
+
+    steps:
+      - name: Download all crash artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-crashes/
+          pattern: fuzzing-crashes-*
+
+      - name: Generate security report
+        run: |
+          echo "# Fuzzing Security Report" > security-report.md
+          echo "" >> security-report.md
+          echo "**Date:** $(date -u)" >> security-report.md
+          echo "**Workflow:** ${{ github.workflow }}" >> security-report.md
+          echo "**Trigger:** ${{ github.event_name }}" >> security-report.md
+          echo "" >> security-report.md
+
+          if [ -d "all-crashes" ] && [ "$(find all-crashes -type f | wc -l)" -gt 0 ]; then
+            echo "## ⚠️ Crashes Detected" >> security-report.md
+            echo "" >> security-report.md
+            find all-crashes -type f -name "*.txt" -o -name "*.log" | while read file; do
+              echo "### $(basename $file)" >> security-report.md
+              echo '```' >> security-report.md
+              head -n 50 "$file" >> security-report.md
+              echo '```' >> security-report.md
+              echo "" >> security-report.md
+            done
+          else
+            echo "## ✅ No Crashes Detected" >> security-report.md
+            echo "" >> security-report.md
+            echo "All fuzzing campaigns completed without discovering crashes." >> security-report.md
+          fi
+
+      - name: Upload security report
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: security-report.md
+          retention-days: 90
+
+      - name: Comment on PR (if applicable)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('security-report.md', 'utf8');
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: report
+            });
